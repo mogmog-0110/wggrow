@@ -27,10 +27,22 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
+#include <imgui.h>
+#include <imgui_impl_win32.h>
+#include <imgui_impl_dx12.h>
+
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 using Microsoft::WRL::ComPtr;
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+static bool g_quit=false;
+struct ImguiSrvPool { ID3D12DescriptorHeap* heap=nullptr; UINT inc=0; D3D12_CPU_DESCRIPTOR_HANDLE cpu0{}; D3D12_GPU_DESCRIPTOR_HANDLE gpu0{}; std::vector<UINT> freeIdx; } g_srv;
+static void imguiSrvAlloc(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* c, D3D12_GPU_DESCRIPTOR_HANDLE* g){ UINT i=g_srv.freeIdx.back(); g_srv.freeIdx.pop_back(); c->ptr=g_srv.cpu0.ptr+SIZE_T(i)*g_srv.inc; g->ptr=g_srv.gpu0.ptr+UINT64(i)*g_srv.inc; }
+static void imguiSrvFree(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE c, D3D12_GPU_DESCRIPTOR_HANDLE){ g_srv.freeIdx.push_back(UINT((c.ptr-g_srv.cpu0.ptr)/g_srv.inc)); }
+static LRESULT CALLBACK volWndProc(HWND h, UINT m, WPARAM w, LPARAM l){ if(ImGui_ImplWin32_WndProcHandler(h,m,w,l)) return 1; if(m==WM_CLOSE||m==WM_DESTROY){ g_quit=true; return 0; } return DefWindowProcW(h,m,w,l); }
 
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 615; }
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
@@ -148,6 +160,10 @@ protected:
             m_gp.rootCol[0]=0.55f;m_gp.rootCol[1]=0.7f;m_gp.rootCol[2]=1.0f; m_gp.tipCol[0]=0.85f;m_gp.tipCol[1]=0.92f;m_gp.tipCol[2]=1.0f;
             m_rootLen=0.42f; m_rootRad=0.02f; m_emissive=3.0f;
         }
+        uploadGenParams();
+    }
+    void uploadGenParams()
+    {
         void* p=nullptr; D3D12_RANGE none{0,0}; m_cb->Map(0,&none,&p); std::memcpy(p,&m_gp,sizeof(m_gp)); m_cb->Unmap(0,nullptr);
     }
 
@@ -258,28 +274,36 @@ protected:
     }
     D3D12_GPU_DESCRIPTOR_HANDLE srvGpu(UINT i){ auto h=m_srvHeap->GetGPUDescriptorHandleForHeapStart(); h.ptr+=UINT64(i)*m_srvInc; return h; }
 
-    void render(float growth=1.0f)
+    void uploadCam(float growth)
     {
         CamP cp{}; cp.W=kImgW; cp.H=kImgH; cp.count=(std::int32_t)m_count; cp.fovTan=0.5f; cp.emissive=m_emissive; cp.growth=growth;
-        cp.camPos[0]=1.75f; cp.camPos[1]=0.85f; cp.camPos[2]=1.75f;
-        cp.camTar[0]=0.0f;  cp.camTar[1]=0.62f; cp.camTar[2]=0.0f;
-        cp.light[0]=0.55f;  cp.light[1]=0.8f;   cp.light[2]=0.42f;
+        float ce=cosf(m_elev), se=sinf(m_elev), sa=sinf(m_azim), ca=cosf(m_azim);
+        cp.camPos[0]=m_tgt[0]+m_dist*ce*sa; cp.camPos[1]=m_tgt[1]+m_dist*se; cp.camPos[2]=m_tgt[2]+m_dist*ce*ca;
+        cp.camTar[0]=m_tgt[0]; cp.camTar[1]=m_tgt[1]; cp.camTar[2]=m_tgt[2];
+        cp.light[0]=0.55f; cp.light[1]=0.8f; cp.light[2]=0.42f;
         void* p=nullptr; D3D12_RANGE none{0,0}; m_camCb->Map(0,&none,&p); std::memcpy(p,&cp,sizeof(cp)); m_camCb->Unmap(0,nullptr);
-
-        m_alloc->Reset(); m_cl->Reset(m_alloc.Get(), nullptr);
-        ID3D12DescriptorHeap* heaps[]={m_srvHeap.Get()}; m_cl->SetDescriptorHeaps(1,heaps);
-        // raymarch → hdr (table u0 = hdr = slot1)
+    }
+    // raymarch → hdr → composite → m_out (cl は reset 済 + m_srvHeap 設定済が前提、out は UAV のまま残る)
+    void recordRender()
+    {
         m_cl->SetComputeRootSignature(m_rmRoot.Get()); m_cl->SetPipelineState(m_rmPso.Get());
         m_cl->SetComputeRootConstantBufferView(0, m_camCb->GetGPUVirtualAddress());
         m_cl->SetComputeRootShaderResourceView(1, m_caps->GetGPUVirtualAddress());
         m_cl->SetComputeRootDescriptorTable(2, srvGpu(1));
         m_cl->Dispatch((kImgW+7)/8, (kImgH+7)/8, 1);
         auto hb=CD3DX12_RESOURCE_BARRIER::UAV(m_hdr.Get()); m_cl->ResourceBarrier(1,&hb);
-        // composite (hdr → out, bloom+tonemap; table u0=out u1=hdr = slot0..1)
         m_cl->SetComputeRootSignature(m_compRoot.Get()); m_cl->SetPipelineState(m_compPso.Get());
         m_cl->SetComputeRootConstantBufferView(0, m_camCb->GetGPUVirtualAddress());
         m_cl->SetComputeRootDescriptorTable(1, srvGpu(0));
         m_cl->Dispatch((kImgW+7)/8, (kImgH+7)/8, 1);
+        auto ob=CD3DX12_RESOURCE_BARRIER::UAV(m_out.Get()); m_cl->ResourceBarrier(1,&ob);
+    }
+    void render(float growth=1.0f)   // headless: 1 枚描いて out を COPY_SOURCE に
+    {
+        uploadCam(growth);
+        m_alloc->Reset(); m_cl->Reset(m_alloc.Get(), nullptr);
+        ID3D12DescriptorHeap* heaps[]={m_srvHeap.Get()}; m_cl->SetDescriptorHeaps(1,heaps);
+        recordRender();
         auto b=CD3DX12_RESOURCE_BARRIER::Transition(m_out.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         m_cl->ResourceBarrier(1,&b);
         chk(m_cl->Close(),"close render"); submit();
@@ -340,18 +364,158 @@ private:
     ComPtr<ID3D12RootSignature> m_rmRoot; ComPtr<ID3D12PipelineState> m_rmPso;
     ComPtr<ID3D12RootSignature> m_compRoot; ComPtr<ID3D12PipelineState> m_compPso;
     ComPtr<ID3D12Resource> m_out, m_hdr, m_camCb; ComPtr<ID3D12DescriptorHeap> m_srvHeap; UINT m_srvInc=0;
+
+    // orbit カメラ / 成長 / 窓
+    float m_azim=0.7f, m_elev=0.18f, m_dist=2.5f, m_tgt[3]={0.0f,0.62f,0.0f};
+    float m_growth=0.0f; bool m_autoGrow=true;
+    std::string m_preset="tree"; bool m_selftest=false; bool m_regen=true;
+    HWND m_hwnd=nullptr; ComPtr<IDXGISwapChain3> m_swap; ComPtr<ID3D12Resource> m_back[3];
+    ComPtr<ID3D12DescriptorHeap> m_rtvHeap; UINT m_rtvInc=0; ComPtr<ID3D12DescriptorHeap> m_imguiHeap;
+
+public:
+    void runInteractive(const std::string& preset, int selftest);
+private:
+    void createWindowAndSwap(); void initImGui(); void pumpMessages(); void drawUI(); void present();
 };
+
+// ── 窓モード (orbit + パラメータ + 成長) ─────────────────────────────────
+void App::createWindowAndSwap()
+{
+    WNDCLASSEXW wc{}; wc.cbSize=sizeof(wc); wc.lpfnWndProc=volWndProc;
+    wc.hInstance=GetModuleHandleW(nullptr); wc.lpszClassName=L"WgGrowWnd";
+    wc.hCursor=LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+    RegisterClassExW(&wc);
+    RECT r{0,0,kImgW,kImgH}; DWORD style=WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX;
+    AdjustWindowRect(&r, style, FALSE);
+    m_hwnd=CreateWindowW(L"WgGrowWnd", L"wggrow - Work Graphs procedural growth (DX12)",
+        style, CW_USEDEFAULT, CW_USEDEFAULT, r.right-r.left, r.bottom-r.top, nullptr,nullptr,wc.hInstance,nullptr);
+    if(!m_hwnd) throw std::runtime_error("CreateWindow failed");
+    ComPtr<IDXGIFactory4> factory; chk(CreateDXGIFactory1(IID_PPV_ARGS(&factory)),"factory(swap)");
+    DXGI_SWAP_CHAIN_DESC1 sd{}; sd.Width=kImgW; sd.Height=kImgH; sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.SampleDesc.Count=1; sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount=3; sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    ComPtr<IDXGISwapChain1> sc1;
+    chk(factory->CreateSwapChainForHwnd(m_q.Get(), m_hwnd, &sd, nullptr, nullptr, &sc1),"swap");
+    chk(sc1.As(&m_swap),"swap3"); factory->MakeWindowAssociation(m_hwnd, DXGI_MWA_NO_ALT_ENTER);
+    D3D12_DESCRIPTOR_HEAP_DESC rh{}; rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV; rh.NumDescriptors=3;
+    chk(m_dev->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&m_rtvHeap)),"rtvHeap");
+    m_rtvInc=m_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    for(UINT i=0;i<3;++i){ chk(m_swap->GetBuffer(i,IID_PPV_ARGS(&m_back[i])),"buf");
+        auto h=m_rtvHeap->GetCPUDescriptorHandleForHeapStart(); h.ptr+=SIZE_T(i)*m_rtvInc;
+        m_dev->CreateRenderTargetView(m_back[i].Get(), nullptr, h); }
+    if(!m_selftest){ ShowWindow(m_hwnd, SW_SHOW); UpdateWindow(m_hwnd); }
+}
+
+void App::initImGui()
+{
+    D3D12_DESCRIPTOR_HEAP_DESC hd{}; hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors=64;
+    hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    chk(m_dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_imguiHeap)),"imguiHeap");
+    g_srv.heap=m_imguiHeap.Get(); g_srv.inc=m_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    g_srv.cpu0=m_imguiHeap->GetCPUDescriptorHandleForHeapStart(); g_srv.gpu0=m_imguiHeap->GetGPUDescriptorHandleForHeapStart();
+    g_srv.freeIdx.clear(); for(int i=63;i>=0;--i) g_srv.freeIdx.push_back(UINT(i));
+    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGui::GetIO().ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark(); ImGui_ImplWin32_Init(m_hwnd);
+    ImGui_ImplDX12_InitInfo ii{}; ii.Device=m_dev.Get(); ii.CommandQueue=m_q.Get(); ii.NumFramesInFlight=3;
+    ii.RTVFormat=DXGI_FORMAT_R8G8B8A8_UNORM; ii.SrvDescriptorHeap=m_imguiHeap.Get();
+    ii.SrvDescriptorAllocFn=imguiSrvAlloc; ii.SrvDescriptorFreeFn=imguiSrvFree;
+    if(!ImGui_ImplDX12_Init(&ii)) throw std::runtime_error("ImGui_ImplDX12_Init failed");
+}
+
+void App::pumpMessages()
+{ MSG msg; while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){ TranslateMessage(&msg); DispatchMessageW(&msg); if(msg.message==WM_QUIT) g_quit=true; } }
+
+void App::drawUI()
+{
+    ImGui::SetNextWindowPos(ImVec2(12,12), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(320,420), ImGuiCond_FirstUseEver);
+    ImGui::Begin("wggrow - Work Graphs");
+    ImGui::TextUnformatted("Preset");
+    auto pb=[&](const char* id, const char* nm){ if(ImGui::Button(id)){ m_preset=nm; applyPreset(nm); m_regen=true; m_growth=0; } ImGui::SameLine(); };
+    pb("Tree","tree"); pb("Coral","coral"); pb("Bush","bush"); pb("Lightning","lightning");
+    ImGui::NewLine(); ImGui::Separator();
+    int bn=(int)m_gp.branchN; if(ImGui::SliderInt("branches",&bn,1,3)){ m_gp.branchN=(std::uint32_t)bn; m_regen=true; }
+    int rd=(int)m_gp.rootDepth; if(ImGui::SliderInt("depth",&rd,4,10)){ m_gp.rootDepth=(std::uint32_t)rd; m_regen=true; }
+    if(ImGui::SliderFloat("spread",&m_gp.spreadAngle,0.1f,1.4f)) m_regen=true;
+    if(ImGui::SliderFloat("length scale",&m_gp.lenScale,0.6f,0.95f)) m_regen=true;
+    if(ImGui::SliderFloat("radius scale",&m_gp.radScale,0.55f,0.9f)) m_regen=true;
+    if(ImGui::SliderFloat("twist",&m_gp.twist,0.0f,3.0f)) m_regen=true;
+    if(ImGui::ColorEdit3("root color",m_gp.rootCol)) m_regen=true;
+    if(ImGui::ColorEdit3("tip color",m_gp.tipCol)) m_regen=true;
+    ImGui::SliderFloat("emissive",&m_emissive,0.0f,4.0f);
+    ImGui::Separator();
+    ImGui::Checkbox("auto grow",&m_autoGrow);
+    if(!m_autoGrow) ImGui::SliderFloat("growth",&m_growth,0.0f,1.0f);
+    if(ImGui::Button("Regrow")) m_growth=0.0f;
+    ImGui::Separator();
+    ImGui::Text("%u capsules   %.1f FPS", m_count, ImGui::GetIO().Framerate);
+    ImGui::TextUnformatted("drag = orbit,  wheel = zoom");
+    ImGui::End();
+}
+
+void App::present()
+{
+    const UINT bb=m_swap->GetCurrentBackBufferIndex();
+    m_alloc->Reset(); m_cl->Reset(m_alloc.Get(), nullptr);
+    ID3D12DescriptorHeap* ch[]={m_srvHeap.Get()}; m_cl->SetDescriptorHeaps(1,ch);
+    recordRender();   // → m_out (UAV)
+    auto t1=CD3DX12_RESOURCE_BARRIER::Transition(m_out.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE); m_cl->ResourceBarrier(1,&t1);
+    auto t2=CD3DX12_RESOURCE_BARRIER::Transition(m_back[bb].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST); m_cl->ResourceBarrier(1,&t2);
+    m_cl->CopyResource(m_back[bb].Get(), m_out.Get());
+    auto t3=CD3DX12_RESOURCE_BARRIER::Transition(m_back[bb].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET); m_cl->ResourceBarrier(1,&t3);
+    auto t4=CD3DX12_RESOURCE_BARRIER::Transition(m_out.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS); m_cl->ResourceBarrier(1,&t4);
+    auto rtv=m_rtvHeap->GetCPUDescriptorHandleForHeapStart(); rtv.ptr+=SIZE_T(bb)*m_rtvInc;
+    m_cl->OMSetRenderTargets(1,&rtv,FALSE,nullptr);
+    ID3D12DescriptorHeap* ih[]={m_imguiHeap.Get()}; m_cl->SetDescriptorHeaps(1,ih);
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_cl.Get());
+    auto t5=CD3DX12_RESOURCE_BARRIER::Transition(m_back[bb].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT); m_cl->ResourceBarrier(1,&t5);
+    chk(m_cl->Close(),"close present"); submit(); m_swap->Present(1,0);
+}
+
+void App::runInteractive(const std::string& preset, int selftest)
+{
+    m_selftest = selftest!=0; m_preset = preset;
+    createDevice(); createGraph(); createBuffers(); createRaymarch();
+    applyPreset(m_preset);
+    createWindowAndSwap(); initImGui();
+    int frame=0;
+    while(!g_quit){
+        pumpMessages(); if(g_quit) break;
+        if(m_selftest && frame>=45) break;
+        ImGui_ImplDX12_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+        drawUI(); ImGui::Render();
+        ImGuiIO& io=ImGui::GetIO();
+        if(io.MouseDown[0] && !io.WantCaptureMouse){ m_azim -= io.MouseDelta.x*0.01f; m_elev += io.MouseDelta.y*0.01f;
+            if(m_elev>1.5f)m_elev=1.5f; if(m_elev<-1.5f)m_elev=-1.5f; }
+        if(io.MouseWheel!=0 && !io.WantCaptureMouse){ m_dist *= (1.0f - io.MouseWheel*0.1f); if(m_dist<0.8f)m_dist=0.8f; if(m_dist>6.0f)m_dist=6.0f; }
+        if(m_selftest && frame==10){ m_preset="lightning"; applyPreset("lightning"); m_regen=true; m_growth=0; }
+        if(m_regen){ uploadGenParams(); generate(); m_count=readbackCount(); m_regen=false; }
+        if(m_autoGrow && m_growth<1.0f){ m_growth += 1.0f/100.0f; if(m_growth>1.0f)m_growth=1.0f; }
+        uploadCam(m_growth);
+        present();
+        ++frame;
+    }
+    { const UINT64 v=++m_fenceVal; m_q->Signal(m_fence.Get(),v); if(m_fence->GetCompletedValue()<v){ m_fence->SetEventOnCompletion(v,m_ev); WaitForSingleObject(m_ev,INFINITE);} }
+    ImGui_ImplDX12_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
+    if(m_selftest) std::printf("[wggrow] interactive selftest OK (%d frames, no window shown)\n", frame);
+}
 
 int main(int argc, char** argv)
 {
     std::string out="wg.png", preset="tree", seq="";
-    int frames=1;
+    int frames=1, interactive=0, selftest=0;
     for(int i=1;i<argc;++i){ std::string a=argv[i];
         if(a=="--out"&&i+1<argc) out=argv[++i];
         else if(a=="--preset"&&i+1<argc) preset=argv[++i];
         else if(a=="--seq"&&i+1<argc) seq=argv[++i];
-        else if(a=="--frames"&&i+1<argc) frames=std::atoi(argv[++i]); }
-    try { App app; if(!seq.empty()) app.runSeq(seq, frames, preset); else app.runRender(out, preset); }
+        else if(a=="--frames"&&i+1<argc) frames=std::atoi(argv[++i]);
+        else if(a=="--interactive") interactive=1;
+        else if(a=="--selftest") selftest=1; }
+    try {
+        App app;
+        if(interactive||selftest) app.runInteractive(preset, selftest);
+        else if(!seq.empty()) app.runSeq(seq, frames, preset);
+        else app.runRender(out, preset);
+    }
     catch(const std::exception& e){ std::fprintf(stderr,"[wggrow] ERROR: %s\n", e.what()); return 1; }
     return 0;
 }

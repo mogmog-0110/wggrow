@@ -45,9 +45,13 @@ build\wggrow.exe --preset coral --out out.png
 ## 実行
 
 ```
+wggrow --interactive --preset lightning                  # 窓 (orbit + パラメータ + 成長)
 wggrow --preset tree|coral|bush|lightning --out x.png    # 1 枚
 wggrow --seq frames --frames 90 --preset tree            # 成長アニメ連番
 ```
+
+窓の操作: ドラッグ = 回転、ホイール = ズーム、プリセットボタン / スライダーで生成パラメータを変更、
+auto grow で成長アニメ、Regrow で最初から。パラメータを変えると Work Graph が即座に再生成する。
 
 ---
 
