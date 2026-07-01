@@ -351,7 +351,7 @@ public:
     }
 
 private:
-    static constexpr int kImgW=720, kImgH=720;
+    static constexpr int kImgW=1280, kImgH=720;
     ComPtr<ID3D12Device9> m_dev; ComPtr<ID3D12CommandQueue> m_q;
     ComPtr<ID3D12CommandAllocator> m_alloc; ComPtr<ID3D12GraphicsCommandList10> m_cl;
     ComPtr<ID3D12Fence> m_fence; HANDLE m_ev=nullptr; UINT64 m_fenceVal=0; ComPtr<ID3D12InfoQueue> m_iq;
