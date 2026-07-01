@@ -11,3 +11,5 @@ msvc.bat
 /wg.png
 /out.png
 *.zip
+imgui.ini
+/frames/

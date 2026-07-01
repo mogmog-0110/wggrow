@@ -417,7 +417,9 @@ void App::initImGui()
     g_srv.heap=m_imguiHeap.Get(); g_srv.inc=m_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     g_srv.cpu0=m_imguiHeap->GetCPUDescriptorHandleForHeapStart(); g_srv.gpu0=m_imguiHeap->GetGPUDescriptorHandleForHeapStart();
     g_srv.freeIdx.clear(); for(int i=63;i>=0;--i) g_srv.freeIdx.push_back(UINT(i));
-    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGui::GetIO().ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;
+    IMGUI_CHECKVERSION(); ImGui::CreateContext();
+    ImGui::GetIO().IniFilename=nullptr;   // imgui.ini を作らない (デモなのでレイアウト永続化不要)
+    ImGui::GetIO().ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark(); ImGui_ImplWin32_Init(m_hwnd);
     ImGui_ImplDX12_InitInfo ii{}; ii.Device=m_dev.Get(); ii.CommandQueue=m_q.Get(); ii.NumFramesInFlight=3;
     ii.RTVFormat=DXGI_FORMAT_R8G8B8A8_UNORM; ii.SrvDescriptorHeap=m_imguiHeap.Get();

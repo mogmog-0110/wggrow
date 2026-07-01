@@ -59,7 +59,13 @@ wggrow --out x.png --preset coral            # 1 枚
 wggrow --seq frames --frames 90 --preset tree # 成長アニメ連番 (frames/ に PNG)
 ```
 
+## ライセンス
+
+MIT License (`LICENSE`)。Copyright (c) 2026 mogmog-0110。
+
+同梱の第三者コード: Dear ImGui (MIT)、stb_image_write (public domain)。
+実行時 SDK (Agility SDK / DXC) は `fetch_deps.ps1` で取得（Microsoft ライセンス、非同梱）。
+
 ---
 
 Work Graphs: D3D12 Agility SDK (Microsoft, 2024)。
-Copyright (c) 2026 mogmog-0110
