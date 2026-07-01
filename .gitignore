@@ -1,0 +1,13 @@
+/build/
+/third_party/agility/
+/third_party/dxc/
+*.obj
+*.exe
+*.pdb
+*.lib
+*.exp
+*.dxil
+msvc.bat
+/wg.png
+/out.png
+*.zip
