@@ -59,7 +59,8 @@ static std::vector<std::uint8_t> readFile(const char* name){
 struct GenParams { std::uint32_t maxCaps, branchN; float spreadAngle, lenScale; float radScale, twist; std::uint32_t rootDepth; float pad0;
                    float rootCol[3]; float pad1; float tipCol[3]; float pad2; };
 struct BranchRec { float pos[3]; float dir[3]; float len; float radius; std::uint32_t depth; std::uint32_t seed; };
-struct alignas(16) CamP { float camPos[3]; std::int32_t W; float camTar[3]; std::int32_t H; float light[3]; std::int32_t count; float fovTan; float emissive; float growth; float pad; float tail[48]; };
+struct alignas(16) CamP { float camPos[3]; std::int32_t W; float camTar[3]; std::int32_t H; float light[3]; std::int32_t count;
+                          float fovTan; float emissive; float growth; std::int32_t rW; std::int32_t rH; float pad[3]; float tail[44]; };
 static_assert(sizeof(CamP)==256, "CamP 256");
 
 class App
@@ -276,7 +277,9 @@ protected:
 
     void uploadCam(float growth)
     {
-        CamP cp{}; cp.W=kImgW; cp.H=kImgH; cp.count=(std::int32_t)m_count; cp.fovTan=0.5f; cp.emissive=m_emissive; cp.growth=growth;
+        m_rW = (std::int32_t)(kImgW*m_renderScale); if(m_rW<32)m_rW=32; if(m_rW>kImgW)m_rW=kImgW;
+        m_rH = (std::int32_t)(kImgH*m_renderScale); if(m_rH<32)m_rH=32; if(m_rH>kImgH)m_rH=kImgH;
+        CamP cp{}; cp.W=kImgW; cp.H=kImgH; cp.rW=m_rW; cp.rH=m_rH; cp.count=(std::int32_t)m_count; cp.fovTan=0.5f; cp.emissive=m_emissive; cp.growth=growth;
         float ce=cosf(m_elev), se=sinf(m_elev), sa=sinf(m_azim), ca=cosf(m_azim);
         cp.camPos[0]=m_tgt[0]+m_dist*ce*sa; cp.camPos[1]=m_tgt[1]+m_dist*se; cp.camPos[2]=m_tgt[2]+m_dist*ce*ca;
         cp.camTar[0]=m_tgt[0]; cp.camTar[1]=m_tgt[1]; cp.camTar[2]=m_tgt[2];
@@ -290,7 +293,7 @@ protected:
         m_cl->SetComputeRootConstantBufferView(0, m_camCb->GetGPUVirtualAddress());
         m_cl->SetComputeRootShaderResourceView(1, m_caps->GetGPUVirtualAddress());
         m_cl->SetComputeRootDescriptorTable(2, srvGpu(1));
-        m_cl->Dispatch((kImgW+7)/8, (kImgH+7)/8, 1);
+        m_cl->Dispatch((m_rW+7)/8, (m_rH+7)/8, 1);   // raymarch は内部解像度で
         auto hb=CD3DX12_RESOURCE_BARRIER::UAV(m_hdr.Get()); m_cl->ResourceBarrier(1,&hb);
         m_cl->SetComputeRootSignature(m_compRoot.Get()); m_cl->SetPipelineState(m_compPso.Get());
         m_cl->SetComputeRootConstantBufferView(0, m_camCb->GetGPUVirtualAddress());
@@ -368,6 +371,7 @@ private:
     // orbit カメラ / 成長 / 窓
     float m_azim=0.7f, m_elev=0.18f, m_dist=2.5f, m_tgt[3]={0.0f,0.62f,0.0f};
     float m_growth=0.0f; bool m_autoGrow=true;
+    float m_renderScale=1.0f; std::int32_t m_rW=kImgW, m_rH=kImgH;   // 内部描画解像度 (窓より低くして高速化)
     std::string m_preset="tree"; bool m_selftest=false; bool m_regen=true;
     HWND m_hwnd=nullptr; ComPtr<IDXGISwapChain3> m_swap; ComPtr<ID3D12Resource> m_back[3];
     ComPtr<ID3D12DescriptorHeap> m_rtvHeap; UINT m_rtvInc=0; ComPtr<ID3D12DescriptorHeap> m_imguiHeap;
@@ -443,6 +447,8 @@ void App::drawUI()
     if(ImGui::ColorEdit3("tip color",m_gp.tipCol)) m_regen=true;
     ImGui::SliderFloat("emissive",&m_emissive,0.0f,4.0f);
     ImGui::Separator();
+    ImGui::SliderFloat("quality (res)",&m_renderScale,0.35f,1.0f);
+    ImGui::SameLine(); ImGui::Text("%dx%d", m_rW, m_rH);
     ImGui::Checkbox("auto grow",&m_autoGrow);
     if(!m_autoGrow) ImGui::SliderFloat("growth",&m_growth,0.0f,1.0f);
     if(ImGui::Button("Regrow")) m_growth=0.0f;
@@ -473,7 +479,7 @@ void App::present()
 
 void App::runInteractive(const std::string& preset, int selftest)
 {
-    m_selftest = selftest!=0; m_preset = preset;
+    m_selftest = selftest!=0; m_preset = preset; m_renderScale = 0.6f;   // 窓は既定で内部 0.6x (滑らかさ優先、品質スライダーで調整可)
     createDevice(); createGraph(); createBuffers(); createRaymarch();
     applyPreset(m_preset);
     createWindowAndSwap(); initImGui();
