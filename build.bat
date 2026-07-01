@@ -25,5 +25,4 @@ echo [3/3] deploying Agility runtime ...
 copy /Y third_party\agility\build\native\bin\x64\D3D12Core.dll     build\D3D12\ >nul
 copy /Y third_party\agility\build\native\bin\x64\d3d12SDKLayers.dll build\D3D12\ >nul
 
-echo done.  interactive:  build\wggrow.exe --interactive --preset lightning
-echo         still:        build\wggrow.exe --preset coral --out out.png
+echo done.  run:  build\wggrow.exe   (just run it - window opens, switch everything inside)

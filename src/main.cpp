@@ -501,20 +501,24 @@ void App::runInteractive(const std::string& preset, int selftest)
 
 int main(int argc, char** argv)
 {
-    std::string out="wg.png", preset="tree", seq="";
-    int frames=1, interactive=0, selftest=0;
+    // 既定 = インタラクティブ窓 (引数なし / ダブルクリックでそのまま開く)。
+    // 全ての切り替え (プリセット・生成パラメータ・成長) は窓の中で行う。
+    // --out / --seq は動画・画像の書き出し用 (パイプライン)、--selftest は自動テスト。
+    std::string out="", preset="tree", seq="";
+    int frames=1, selftest=0;
     for(int i=1;i<argc;++i){ std::string a=argv[i];
         if(a=="--out"&&i+1<argc) out=argv[++i];
         else if(a=="--preset"&&i+1<argc) preset=argv[++i];
         else if(a=="--seq"&&i+1<argc) seq=argv[++i];
         else if(a=="--frames"&&i+1<argc) frames=std::atoi(argv[++i]);
-        else if(a=="--interactive") interactive=1;
-        else if(a=="--selftest") selftest=1; }
+        else if(a=="--selftest") selftest=1;
+        else if(a=="--interactive") {} /* 既定なので何もしない (後方互換) */ }
     try {
         App app;
-        if(interactive||selftest) app.runInteractive(preset, selftest);
-        else if(!seq.empty()) app.runSeq(seq, frames, preset);
-        else app.runRender(out, preset);
+        if(selftest)            app.runInteractive(preset, 1);
+        else if(!seq.empty())   app.runSeq(seq, frames, preset);
+        else if(!out.empty())   app.runRender(out, preset);
+        else                    app.runInteractive(preset, 0);   // 既定: 窓
     }
     catch(const std::exception& e){ std::fprintf(stderr,"[wggrow] ERROR: %s\n", e.what()); return 1; }
     return 0;
